@@ -1,7 +1,8 @@
 import numpy as np
 import torch.nn as nn
 from datasets import *
-
+# https://github.com/harvardnlp/annotated-transformer
+# havard NLP team
 d_model = 512   # 字 Embedding 的维度
 d_ff = 2048     # 前向传播隐藏层维度
 d_k = d_v = 64  # K(=Q), V的维度
@@ -19,7 +20,8 @@ class PositionalEncoding(nn.Module):
         pos_table[1:, 0::2] = np.sin(pos_table[1:, 0::2])           # 字嵌入维度为偶数时
         pos_table[1:, 1::2] = np.cos(pos_table[1:, 1::2])           # 字嵌入维度为奇数时
         self.pos_table = torch.FloatTensor(pos_table).cuda()        # enc_inputs: [seq_len, d_model]
-
+    
+    # positional output = embedding + position
     def forward(self, enc_inputs):                                  # enc_inputs: [batch_size, seq_len, d_model]
         enc_inputs += self.pos_table[:enc_inputs.size(1), :]
         return self.dropout(enc_inputs.cuda())
@@ -47,6 +49,7 @@ class ScaledDotProductAttention(nn.Module):
                                                                         # K: [batch_size, n_heads, len_k, d_k]
                                                                         # V: [batch_size, n_heads, len_v(=len_k), d_v]
                                                                         # attn_mask: [batch_size, n_heads, seq_len, seq_len]
+        # 注意力矩阵的计算方式
         scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(d_k)    # scores : [batch_size, n_heads, len_q, len_k]
         scores.masked_fill_(attn_mask, -1e9)                            # 如果时停用词P就等于 0
         attn = nn.Softmax(dim=-1)(scores)
