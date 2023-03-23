@@ -9,7 +9,9 @@ d_k = d_v = 64  # K(=Q), V的维度
 n_layers = 6    # 有多少个encoder和decoder
 n_heads = 8     # Multi-Head Attention设置为8
 
-
+# ---------------------------------------------------------
+# position-encoding + world-embedding
+# ---------------------------------------------------------
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -26,7 +28,6 @@ class PositionalEncoding(nn.Module):
         enc_inputs += self.pos_table[:enc_inputs.size(1), :]
         return self.dropout(enc_inputs.cuda())
 
-
 def get_attn_pad_mask(seq_q, seq_k):                                # seq_q: [batch_size, seq_len] ,seq_k: [batch_size, seq_len]
     batch_size, len_q = seq_q.size()
     batch_size, len_k = seq_k.size()
@@ -40,29 +41,40 @@ def get_attn_subsequence_mask(seq):                                 # seq: [batc
     subsequence_mask = torch.from_numpy(subsequence_mask).byte()    # [batch_size, tgt_len, tgt_len]
     return subsequence_mask
 
-
+# ---------------------------------------------------------------------
+# https://zhuanlan.zhihu.com/p/82312421
+# attention 有好多种 additive attention、local-based、general、dot-product、scaled dot-product
+# Transformer 中用到的是scaled dot-product attention 
+# 结构图请参考如下链接 # https://zhuanlan.zhihu.com/p/47812375
+# ---------------------------------------------------------------------
 class ScaledDotProductAttention(nn.Module):
     def __init__(self):
         super(ScaledDotProductAttention, self).__init__()
-
+        # d_k 输入的维度 64=512/8
+    
     def forward(self, Q, K, V, attn_mask):                              # Q: [batch_size, n_heads, len_q, d_k]
                                                                         # K: [batch_size, n_heads, len_k, d_k]
                                                                         # V: [batch_size, n_heads, len_v(=len_k), d_v]
                                                                         # attn_mask: [batch_size, n_heads, seq_len, seq_len]
-        # 注意力矩阵的计算方式
+        # https://zhuanlan.zhihu.com/p/48508221 
+        # 注意力矩阵 a 的计算方式 dimension -1, -2 are swapped
         scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(d_k)    # scores : [batch_size, n_heads, len_q, len_k]
         scores.masked_fill_(attn_mask, -1e9)                            # 如果时停用词P就等于 0
         attn = nn.Softmax(dim=-1)(scores)
+        # softmax(Q*K/sqrt(d_k)) * V
         context = torch.matmul(attn, V)                                 # [batch_size, n_heads, len_q, d_v]
         return context, attn
 
-
+# Encoder 中的 Multi-head attention: residual connection + layer normalization
 class MultiHeadAttention(nn.Module):
+    # Multi-head attention = h * self-attention
     def __init__(self):
         super(MultiHeadAttention, self).__init__()
+        # d_model: embedding length
         self.W_Q = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_K = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_V = nn.Linear(d_model, d_v * n_heads, bias=False)
+        # 要做一次线性变换 在不同的实现中都存在这一步？？https://zhuanlan.zhihu.com/p/47812375
         self.fc = nn.Linear(n_heads * d_v, d_model, bias=False)
 
     def forward(self, input_Q, input_K, input_V, attn_mask):    # input_Q: [batch_size, len_q, d_model]
@@ -72,19 +84,19 @@ class MultiHeadAttention(nn.Module):
         residual, batch_size = input_Q, input_Q.size(0)
         Q = self.W_Q(input_Q).view(batch_size, -1, n_heads, d_k).transpose(1, 2)    # Q: [batch_size, n_heads, len_q, d_k]
         K = self.W_K(input_K).view(batch_size, -1, n_heads, d_k).transpose(1, 2)    # K: [batch_size, n_heads, len_k, d_k]
-        V = self.W_V(input_V).view(batch_size, -1, n_heads, d_v).transpose(1,
-                                                                           2)       # V: [batch_size, n_heads, len_v(=len_k), d_v]
-        attn_mask = attn_mask.unsqueeze(1).repeat(1, n_heads, 1,
-                                                  1)                                # attn_mask : [batch_size, n_heads, seq_len, seq_len]
+        V = self.W_V(input_V).view(batch_size, -1, n_heads, d_v).transpose(1, 2)    # V: [batch_size, n_heads, len_v(=len_k), d_v]
+        
+        attn_mask = attn_mask.unsqueeze(1).repeat(1, n_heads, 1, 1)                 # attn_mask : [batch_size, n_heads, seq_len, seq_len]        context, attn = ScaledDotProductAttention()(Q, K, V, attn_mask)             # context: [batch_size, n_heads, len_q, d_v]
+        # context b 矩阵
         context, attn = ScaledDotProductAttention()(Q, K, V, attn_mask)             # context: [batch_size, n_heads, len_q, d_v]
                                                                                     # attn: [batch_size, n_heads, len_q, len_k]
-        context = context.transpose(1, 2).reshape(batch_size, -1,
-                                                  n_heads * d_v)                    # context: [batch_size, len_q, n_heads * d_v]
+        context = context.transpose(1, 2).reshape(batch_size, -1, n_heads * d_v)    # context: [batch_size, len_q, n_heads * d_v]
         output = self.fc(context)                                                   # [batch_size, len_q, d_model]
         return nn.LayerNorm(d_model).cuda()(output + residual), attn
 
-
+# Encoder 中的feed-forward net 需要有残差 + normalization
 class PoswiseFeedForwardNet(nn.Module):
+    # https://zhuanlan.zhihu.com/p/47812375
     def __init__(self):
         super(PoswiseFeedForwardNet, self).__init__()
         self.fc = nn.Sequential(
@@ -97,7 +109,7 @@ class PoswiseFeedForwardNet(nn.Module):
         output = self.fc(inputs)
         return nn.LayerNorm(d_model).cuda()(output + residual)  # [batch_size, seq_len, d_model]
 
-
+# encoder = multi-head attention + position-wise feed-forward network
 class EncoderLayer(nn.Module):
     def __init__(self):
         super(EncoderLayer, self).__init__()
@@ -113,19 +125,19 @@ class EncoderLayer(nn.Module):
         return enc_outputs, attn
 
 
-class EncoderLayer(nn.Module):
-    def __init__(self):
-        super(EncoderLayer, self).__init__()
-        self.enc_self_attn = MultiHeadAttention()       # 多头注意力机制
-        self.pos_ffn = PoswiseFeedForwardNet()          # 前馈神经网络
+# class EncoderLayer(nn.Module):
+#     def __init__(self):
+#         super(EncoderLayer, self).__init__()
+#         self.enc_self_attn = MultiHeadAttention()       # 多头注意力机制
+#         self.pos_ffn = PoswiseFeedForwardNet()          # 前馈神经网络
 
-    def forward(self, enc_inputs, enc_self_attn_mask):  # enc_inputs: [batch_size, src_len, d_model]
-        # 输入3个enc_inputs分别与W_q、W_k、W_v相乘得到Q、K、V             # enc_self_attn_mask: [batch_size, src_len, src_len]
-        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs,
-                                                                        # enc_outputs: [batch_size, src_len, d_model],
-                                               enc_self_attn_mask)      # attn: [batch_size, n_heads, src_len, src_len]
-        enc_outputs = self.pos_ffn(enc_outputs)                         # enc_outputs: [batch_size, src_len, d_model]
-        return enc_outputs, attn
+#     def forward(self, enc_inputs, enc_self_attn_mask):  # enc_inputs: [batch_size, src_len, d_model]
+#         # 输入3个enc_inputs分别与W_q、W_k、W_v相乘得到Q、K、V             # enc_self_attn_mask: [batch_size, src_len, src_len]
+#         enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs,
+#                                                                         # enc_outputs: [batch_size, src_len, d_model],
+#                                                enc_self_attn_mask)      # attn: [batch_size, n_heads, src_len, src_len]
+#         enc_outputs = self.pos_ffn(enc_outputs)                         # enc_outputs: [batch_size, src_len, d_model]
+#         return enc_outputs, attn
 
 class Encoder(nn.Module):
     def __init__(self):
